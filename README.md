@@ -16,23 +16,83 @@ npm install
 npm run build
 ```
 
-### 2. Create Slack App
+### 2. Create Your Slack App
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
-2. Name your app and select your workspace
-3. Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes**
-4. Add these permissions:
-   ```
-   channels:history    channels:read    groups:history    groups:read
-   im:history         im:read          chat:write        users:read
-   team:read
-   ```
-5. Click **Install to Workspace** → **Allow**
-6. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
+**This lets you send messages as yourself (not a bot).**
 
-### 3. Configure MCP Client
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) 
+2. Click **"Create New App"** → **"From scratch"**
+3. App Name: **"My Personal Assistant"**
+4. Pick your Slack workspace → **"Create App"**
 
-Add to your MCP client config (e.g., Claude Desktop at `~/Library/Application Support/Claude/claude_desktop_config.json`):
+5. Click **"OAuth & Permissions"** (in the left sidebar)
+6. Scroll to **"Redirect URLs"** → Click **"Add New Redirect URL"**
+7. Type: `https://localhost:3001/oauth/callback` → **"Add"** → **"Save URLs"**
+
+8. Scroll to **"User Token Scopes"** (NOT "Bot Token Scopes")
+9. Click **"Add an OAuth Scope"** and add these **9 permissions**:
+   - `channels:history` - Read channel messages
+   - `channels:read` - See channel list
+   - `groups:history` - Read private group messages  
+   - `groups:read` - See private groups
+   - `im:history` - Read direct messages
+   - `im:read` - See direct message list
+   - `chat:write` - Send messages as you
+   - `users:read` - See user info
+   - `team:read` - See workspace info
+
+10. **Important**: Don't add anything to "Bot Token Scopes" - leave it empty!
+
+11. Click **"Basic Information"** (in left sidebar)
+12. Copy your **"Client ID"** (save it somewhere safe)
+13. Click **"Show"** next to **"Client Secret"** → Copy it (save it somewhere safe)
+
+### 3. Create Security Certificates
+
+Open Terminal and run:
+```bash
+cd slack-mcp-server
+./generate-certs.sh
+```
+
+This creates secure certificates needed for authentication.
+
+### 4. Set Up Your App Configuration
+
+Create a folder and file to store your app info:
+
+**On Mac/Linux:**
+```bash
+mkdir -p ~/.slack-mcp
+```
+
+**On Windows:**
+```bash
+mkdir %USERPROFILE%\.slack-mcp
+```
+
+Create a file called `oauth-config.json` in that folder with your app details:
+
+```json
+{
+  "apps": {
+    "my-workspace": {
+      "clientId": "paste-your-client-id-here",
+      "clientSecret": "paste-your-client-secret-here"
+    }
+  }
+}
+```
+
+Replace the text with your actual Client ID and Client Secret from step 2.
+
+### 5. Connect to Claude Desktop
+
+Find your Claude Desktop configuration file:
+- **Mac**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+Open it and add this (replace the path with where you downloaded this project):
 
 ```json
 {
@@ -45,27 +105,25 @@ Add to your MCP client config (e.g., Claude Desktop at `~/Library/Application Su
 }
 ```
 
-**Replace `/path/to/slack-mcp-server` with your actual path**
+**Example path**: `/Users/john/Downloads/slack-mcp-server/dist/index.js`
 
-### 4. Add Your Slack Workspace
+### 6. Restart Claude & Connect Your Slack
 
-In your AI assistant, use the MCP tool:
+1. **Quit Claude Desktop completely** and reopen it
+2. In Claude, type: **"Please authenticate my Slack workspace"**
+3. Claude will ask for your workspace details - provide:
+   - **Workspace ID**: `my-workspace` 
+   - **Workspace Name**: `My Company Slack` (or whatever you want to call it)
 
-```
-Tool: add_workspace
-- id: my-workspace
-- name: My Company Slack  
-- token: xoxb-your-bot-token-here
-- teamId: your-team-id
-```
+Claude will open your browser for you to approve the connection.
 
-**Done!** You can now use Slack through your AI assistant.
+**Done!** You can now use Slack through your AI assistant with messages appearing as yourself.
 
 ## Available Tools
 
 | Tool | Description |
 |------|-------------|
-| `add_workspace` | Connect a new Slack workspace |
+| `authenticate_user` | Authenticate workspace as user (messages appear as you) |
 | `list_workspaces` | Show all connected workspaces |
 | `get_unread_conversations` | Get all unread messages |
 | `get_channels` | List channels, DMs, and groups |
@@ -74,50 +132,66 @@ Tool: add_workspace
 | `get_users` | List workspace users |
 | `get_user_info` | Get detailed user information |
 
-## Advanced Setup
+## Multiple Workspaces
 
-### Send Messages as Yourself (Not Bot)
+Configure multiple workspaces in your `oauth-config.json`:
 
-For messages that appear to come from you instead of a bot, see [USER-AUTH-GUIDE.md](USER-AUTH-GUIDE.md) for user authentication setup.
+```json
+{
+  "apps": {
+    "company-1": {
+      "clientId": "client-id-1",
+      "clientSecret": "client-secret-1"
+    },
+    "company-2": {
+      "clientId": "client-id-2", 
+      "clientSecret": "client-secret-2"
+    }
+  }
+}
+```
 
-### Multiple Workspaces
-
-Add additional workspaces by calling `add_workspace` with different IDs:
+Then authenticate each workspace:
 
 ```
-add_workspace:
-- id: company-1
-- name: Company One
-- token: xoxb-token-1
+authenticate_user:
+- workspaceId: company-1
+- workspaceName: Company One
 
-add_workspace:
-- id: company-2  
-- name: Company Two
-- token: xoxb-token-2
+authenticate_user:
+- workspaceId: company-2
+- workspaceName: Company Two
 ```
 
 ## Troubleshooting
 
+**"This app is requesting permission to install a bot"**
+- Your app has bot scopes configured - remove ALL bot token scopes
+- Make sure "Bot Token Scopes" section is completely empty
+- Only "User Token Scopes" should have permissions
+
 **"Permission denied" errors**
-- Verify your bot has the required scopes listed above
-- Reinstall your Slack app if you added scopes after installation
-- Invite your bot to private channels you want to access
+- Verify your app has the required user scopes listed above
+- Some workspaces require admin approval for user apps
+- Check that you have access to the channels you're trying to read
 
 **"Channel not found" errors**
 - Use `get_channels` to see available channels and their IDs
-- Make sure your bot is a member of the channel
+- Make sure you're a member of the channel
+
+**"invalid_scope" errors**
+- Check that scopes are in "User Token Scopes" (not Bot Token Scopes)
+- Verify all required user scopes are added with correct spelling
 
 **Setup questions**
-- Configuration is stored in `~/.slack-mcp/config.json`
+- OAuth configuration is stored in `~/.slack-mcp/oauth-config.json`
+- User authentication tokens are stored in `~/.slack-mcp/config.json`
 - Check [TESTING-GUIDE.md](TESTING-GUIDE.md) for testing instructions
-- See other documentation files for specific setup scenarios
 
-## Documentation
+## Additional Guides
 
-- [USER-AUTH-GUIDE.md](USER-AUTH-GUIDE.md) - Send messages as yourself
 - [TESTING-GUIDE.md](TESTING-GUIDE.md) - Test your setup
-- [USAGE.md](USAGE.md) - Detailed usage examples
-- [SECURE-SETUP.md](SECURE-SETUP.md) - Security best practices
+- [USAGE.md](USAGE.md) - Examples of what to say to Claude
 
 ## License
 
