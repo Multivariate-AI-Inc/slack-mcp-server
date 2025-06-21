@@ -4,7 +4,17 @@ A Model Context Protocol (MCP) server that enables AI assistants to interact wit
 
 ## Quick Start
 
-### 1. Install & Build
+### Option 1: Install via npm (Recommended)
+
+```bash
+# Install globally
+npm install -g @multivariate-ai-inc/slack-mcp-server
+
+# Or install locally in your project
+npm install @multivariate-ai-inc/slack-mcp-server
+```
+
+### Option 2: Install from Source
 
 ```bash
 # Clone the repository
@@ -92,8 +102,20 @@ Find your Claude Desktop configuration file:
 - **Mac**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-Open it and add this (replace the path with where you downloaded this project):
+Open it and add this configuration:
 
+#### If you installed via npm globally:
+```json
+{
+  "mcpServers": {
+    "slack": {
+      "command": "slack-mcp-server"
+    }
+  }
+}
+```
+
+#### If you installed locally or from source:
 ```json
 {
   "mcpServers": {
@@ -105,7 +127,7 @@ Open it and add this (replace the path with where you downloaded this project):
 }
 ```
 
-**Example path**: `/Users/john/Downloads/slack-mcp-server/dist/index.js`
+**Example source path**: `/Users/john/Downloads/slack-mcp-server/dist/index.js`
 
 ### 6. Restart Claude & Connect Your Slack
 
