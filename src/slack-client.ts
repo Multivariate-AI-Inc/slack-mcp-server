@@ -1,11 +1,56 @@
 import { WebClient } from '@slack/web-api';
 import { SlackWorkspace, SlackMessage, SlackChannel, SlackUser, UnreadConversation } from './types.js';
 
+// Rate limiting helper
+class RateLimiter {
+  private requests: Map<string, number[]> = new Map();
+  private readonly maxRequests = 50; // Conservative limit per minute
+  private readonly windowMs = 60000; // 1 minute
+
+  canMakeRequest(workspaceId: string): boolean {
+    const now = Date.now();
+    const requests = this.requests.get(workspaceId) || [];
+    
+    // Remove old requests outside the window
+    const validRequests = requests.filter(time => now - time < this.windowMs);
+    
+    if (validRequests.length >= this.maxRequests) {
+      return false;
+    }
+    
+    // Add current request
+    validRequests.push(now);
+    this.requests.set(workspaceId, validRequests);
+    return true;
+  }
+
+  async waitForRateLimit(workspaceId: string): Promise<void> {
+    while (!this.canMakeRequest(workspaceId)) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+}
+
 export class SlackClientManager {
   private clients: Map<string, WebClient> = new Map();
+  private rateLimiter = new RateLimiter();
 
   addWorkspace(workspace: SlackWorkspace): void {
-    const client = new WebClient(workspace.token);
+    const client = new WebClient(workspace.token, {
+      retryConfig: {
+        retries: 3,
+        factor: 2,
+      },
+      logger: {
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        setLevel: () => {},
+        getLevel: () => 'error' as any,
+        setName: () => {},
+      },
+    });
     this.clients.set(workspace.id, client);
   }
 
@@ -19,15 +64,18 @@ export class SlackClientManager {
 
   async testConnection(workspaceId: string): Promise<boolean> {
     try {
+      await this.rateLimiter.waitForRateLimit(workspaceId);
       const client = this.getClient(workspaceId);
       const result = await client.auth.test();
       return result.ok === true;
     } catch (error) {
+      console.error(`Connection test failed for workspace ${workspaceId}:`, error);
       return false;
     }
   }
 
   async getChannels(workspaceId: string): Promise<SlackChannel[]> {
+    await this.rateLimiter.waitForRateLimit(workspaceId);
     const client = this.getClient(workspaceId);
     const channels: SlackChannel[] = [];
 
@@ -89,12 +137,19 @@ export class SlackClientManager {
       }
 
       return channels;
-    } catch (error) {
+    } catch (error: any) {
+      if (error.code === 'ratelimited') {
+        console.error(`Rate limited for workspace ${workspaceId}, waiting...`);
+        await new Promise(resolve => setTimeout(resolve, error.retryAfter * 1000 || 60000));
+        return this.getChannels(workspaceId); // Retry once
+      }
+      console.error(`Error getting channels for workspace ${workspaceId}:`, error.message);
       throw error;
     }
   }
 
   async getUnreadMessages(workspaceId: string, channelId: string): Promise<SlackMessage[]> {
+    await this.rateLimiter.waitForRateLimit(workspaceId);
     const client = this.getClient(workspaceId);
 
     try {
@@ -130,37 +185,117 @@ export class SlackClientManager {
       }));
 
       return messages.reverse(); // Return in chronological order
-    } catch (error) {
+    } catch (error: any) {
+      if (error.code === 'ratelimited') {
+        console.error(`Rate limited getting messages for ${channelId}, waiting...`);
+        await new Promise(resolve => setTimeout(resolve, error.retryAfter * 1000 || 60000));
+        return this.getUnreadMessages(workspaceId, channelId); // Retry once
+      }
+      console.error(`Error getting messages for ${channelId}:`, error.message);
       throw error;
     }
   }
 
   async getAllUnreadConversations(workspaceId: string): Promise<UnreadConversation[]> {
-    const channels = await this.getChannels(workspaceId);
+    await this.rateLimiter.waitForRateLimit(workspaceId);
+    const client = this.getClient(workspaceId);
     const unreadConversations: UnreadConversation[] = [];
 
-    for (const channel of channels) {
-      if (!channel.is_member && !channel.is_im) {
-        continue; // Skip channels we're not a member of
-      }
+    try {
+      // Get conversations with unread counts using conversations.list with unread info
+      const result = await client.conversations.list({
+        exclude_archived: true,
+        types: 'public_channel,private_channel,im,mpim',
+        limit: 1000
+      });
 
-      try {
-        const messages = await this.getUnreadMessages(workspaceId, channel.id);
-        
-        if (messages.length > 0) {
-          unreadConversations.push({
-            channel,
-            messages,
-            unread_count: messages.length,
-            workspace: workspaceId
-          });
+      if (!result.channels) return [];
+
+      for (const channel of result.channels) {
+        // Skip channels we're not a member of (except DMs)
+        if (!channel.is_member && !channel.is_im) {
+          continue;
         }
-      } catch (error) {
-        // Continue with other channels
-      }
-    }
 
-    return unreadConversations;
+        try {
+          // Get conversation info to check for unread messages
+          await this.rateLimiter.waitForRateLimit(workspaceId);
+          const convInfo = await client.conversations.info({
+            channel: channel.id!,
+            include_num_members: true
+          });
+
+          if (!convInfo.channel) continue;
+
+          // Get recent history to check for actual messages
+          await this.rateLimiter.waitForRateLimit(workspaceId);
+          const history = await client.conversations.history({
+            channel: channel.id!,
+            limit: 10 // Get recent messages to check activity
+          });
+
+          if (!history.messages || history.messages.length === 0) {
+            continue;
+          }
+
+          // For DMs and channels, consider them "unread" if there are recent messages
+          // This is a simplified approach since Slack's unread tracking is complex
+          const recentMessages = history.messages.slice(0, 5);
+          const hasRecentActivity = recentMessages.some(msg => {
+            const messageTime = parseFloat(msg.ts || '0') * 1000;
+            const oneHourAgo = Date.now() - (60 * 60 * 1000);
+            return messageTime > oneHourAgo;
+          });
+
+          if (hasRecentActivity) {
+            const messages: SlackMessage[] = recentMessages.map(msg => ({
+              ts: msg.ts!,
+              text: msg.text || '',
+              user: msg.user || msg.bot_id || 'unknown',
+              channel: channel.id!,
+              thread_ts: msg.thread_ts,
+              subtype: msg.subtype,
+              username: msg.username,
+              bot_id: msg.bot_id
+            }));
+
+            const channelInfo = {
+              id: channel.id!,
+              name: channel.name || (channel.is_im ? 'DM' : channel.id!),
+              is_channel: !channel.is_im && !channel.is_mpim && !channel.is_private,
+              is_group: (channel.is_private && !channel.is_im) || false,
+              is_im: channel.is_im || false,
+              is_private: channel.is_private || false,
+              is_member: channel.is_member || false,
+              num_members: channel.num_members
+            };
+
+            unreadConversations.push({
+              channel: channelInfo,
+              messages: messages.reverse(), // Chronological order
+              unread_count: messages.length,
+              workspace: workspaceId
+            });
+          }
+        } catch (error: any) {
+          // Skip this channel on error but continue with others
+          if (error.code !== 'ratelimited') {
+            console.error(`Error checking channel ${channel.id}:`, error.message);
+          }
+          continue;
+        }
+      }
+
+      return unreadConversations;
+    } catch (error: any) {
+      if (error.code === 'ratelimited') {
+        console.error(`Rate limited getting conversations for workspace ${workspaceId}, waiting...`);
+        await new Promise(resolve => setTimeout(resolve, error.retryAfter * 1000 || 60000));
+        return this.getAllUnreadConversations(workspaceId); // Retry once
+      }
+      console.error(`Error getting unread conversations for workspace ${workspaceId}:`, error.message);
+      throw error;
+    }
   }
 
   async sendMessage(workspaceId: string, channelId: string, text: string, threadTs?: string): Promise<void> {

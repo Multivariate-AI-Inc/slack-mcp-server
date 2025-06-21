@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListPromptsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
@@ -111,11 +112,41 @@ const ResolveUserIdsSchema = z.object({
 });
 
 async function main() {
+  // Suppress console logs that interfere with MCP JSON communication
+  const originalLog = console.log;
+  const originalInfo = console.info;
+  const originalWarn = console.warn;
+  
+  console.log = (...args) => {
+    const message = args.join(' ');
+    if (message.includes('[INFO]') || message.includes('[WARN]') || message.includes('web-api')) {
+      return; // Suppress Slack API logs
+    }
+    originalLog.apply(console, args);
+  };
+  
+  console.info = (...args) => {
+    const message = args.join(' ');
+    if (message.includes('[INFO]') || message.includes('web-api')) {
+      return; // Suppress Slack API logs
+    }
+    originalInfo.apply(console, args);
+  };
+  
+  console.warn = (...args) => {
+    const message = args.join(' ');
+    if (message.includes('[WARN]') || message.includes('web-api')) {
+      return; // Suppress Slack API logs
+    }
+    originalWarn.apply(console, args);
+  };
+
   const server = new Server({
     name: 'slack-mcp-server',
     version: '1.0.0',
     capabilities: {
       tools: {},
+      prompts: {},
     },
   });
 
@@ -198,6 +229,11 @@ async function main() {
         inputSchema: zodToJsonSchema(ResolveUserIdsSchema),
       },
     ],
+  }));
+
+  // Prompts handler
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: [],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -359,13 +395,16 @@ async function main() {
 
           for (const workspace of workspaces) {
             try {
+              console.error(`Fetching unread conversations for workspace: ${workspace.name}`);
               const unreadConversations = await slackManager.getAllUnreadConversations(workspace.id);
+              console.error(`Found ${unreadConversations.length} unread conversations in ${workspace.name}`);
               allUnreadConversations.push(...unreadConversations.map(conv => ({
                 ...conv,
                 workspaceName: workspace.name
               })));
-            } catch (error) {
-              // Skip workspace on error
+            } catch (error: any) {
+              console.error(`Error getting unread conversations from workspace ${workspace.name}:`, error.message);
+              // Continue with other workspaces
             }
           }
 
